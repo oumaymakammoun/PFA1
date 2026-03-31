@@ -1,0 +1,136 @@
+# =====================================================================
+#  PFA Ollama — Traitement Intelligent de Documents Commerciaux
+#  Services : n8n · Ollama · PostgreSQL · Streamlit
+# =====================================================================
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: pfa_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pfa_network
+
+  # ── Ollama (Moteur IA local) ──────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: pfa_ollama
+    restart: unless-stopped
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=24h
+    # Décommentez les lignes suivantes si vous avez un GPU NVIDIA :
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: [ "CMD", "ollama", "list" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - pfa_network
+
+  # ── Ollama Model Puller (init container) ──────────────────────────
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: pfa_ollama_pull
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: [ "sh", "-c", "ollama pull ${OLLAMA_MODEL:-moondream}" ]
+    environment:
+      - OLLAMA_HOST=ollama
+    networks:
+      - pfa_network
+
+  # ── n8n (Orchestrateur de workflows) ──────────────────────────────
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:latest
+    container_name: pfa_n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - N8N_DEFAULT_BINARY_DATA_MODE=${N8N_DEFAULT_BINARY_DATA_MODE}
+      - WEBHOOK_URL=http://localhost:${N8N_PORT:-5678}/
+      - EXECUTIONS_TIMEOUT=600
+      - EXECUTIONS_TIMEOUT_MAX=600
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/home/node/workflows
+    networks:
+      - pfa_network
+
+  # ── Streamlit (Interface utilisateur) ─────────────────────────────
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    container_name: pfa_streamlit
+    restart: unless-stopped
+    depends_on:
+      - n8n
+    environment:
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    volumes:
+      - ./streamlit_app:/app
+    networks:
+      - pfa_network
+
+# ── Volumes persistants ────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  ollama_data:
+    driver: local
+  n8n_data:
+    driver: local
+
+# ── Réseau interne ─────────────────────────────────────────────────
+networks:
+  pfa_network:
+    driver: bridge
