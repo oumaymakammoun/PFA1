@@ -1,14 +1,14 @@
 # DocuFlow AI — Traitement Intelligent de Documents Commerciaux
 
-> Application d'extraction automatique de données depuis des factures et bons de livraison, propulsée par **Ollama (Qwen3-VL)** et orchestrée par **n8n**.
+> Application d'extraction automatique de données depuis des factures et bons de livraison, propulsée par **Mistral OCR** et orchestrée par **n8n**.
 
 ## 🏗️ Architecture
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Streamlit   │────▶│     n8n      │────▶│   Ollama     │
-│  (Port 8501) │     │  (Port 5678) │     │ (Port 11434) │
-│  Interface   │◀────│  Orchestrate │◀────│  qwen3-vl:8b │
+│  Streamlit   │────▶│     n8n      │     │  Mistral OCR │
+│  (Port 8501) │     │  (Port 5678) │     │  (API Cloud) │
+│  Interface   │─────┼──────────────┼────▶│  OCR + Chat  │
 └──────────────┘     └──────┬───────┘     └──────────────┘
                             │
                      ┌──────▼───────┐
@@ -21,7 +21,14 @@
 
 ### Prérequis
 - **Docker Desktop** installé et lancé
-- **8 Go de RAM** minimum (recommandé : 16 Go pour le modèle VLM)
+- **Clé API Mistral** — Créez un compte sur [console.mistral.ai](https://console.mistral.ai/) et récupérez votre clé API
+
+### Configuration
+
+1. Ouvrez le fichier `.env` et renseignez votre clé API Mistral :
+```bash
+MISTRAL_API_KEY=votre_vraie_cle_api_ici
+```
 
 ### Lancement
 
@@ -32,10 +39,7 @@ cd pfa_ollama
 # 2. Lancer tous les services
 docker compose up -d --build
 
-# 3. Attendre le téléchargement du modèle (~5 Go, première fois uniquement)
-docker logs -f pfa_ollama_pull
-
-# 4. Vérifier que tout fonctionne
+# 3. Vérifier que tout fonctionne
 docker compose ps
 ```
 
@@ -45,7 +49,6 @@ docker compose ps
 | ------------ | ----------------------------- | ------------------- |
 | **Streamlit** | http://localhost:8501         | —                   |
 | **n8n**       | http://localhost:5678         | admin / admin123    |
-| **Ollama**    | http://localhost:11434        | —                   |
 | **PostgreSQL**| localhost:5432                | pfa_user / (voir .env) |
 
 ### Importer le workflow n8n
@@ -54,14 +57,14 @@ docker compose ps
 2. Menu **Workflows** → **Import from File**
 3. Sélectionner `workflows/invoice_extraction.json`
 4. **Activer** le workflow (toggle en haut à droite)
-5. Le webhook `POST /webhook/invoice-extract` est maintenant prêt
+5. Le webhook `POST /webhook/facture` est maintenant prêt
 
 ### Tester l'extraction
 
 1. Ouvrir **Streamlit** → http://localhost:8501
 2. Uploader une image de facture (PNG, JPG, PDF)
 3. Cliquer sur **🚀 Extraire les données**
-4. Les données extraites s'affichent en temps réel
+4. Les données extraites s'affichent en quelques secondes
 
 ## 📁 Structure du projet
 
@@ -69,7 +72,7 @@ docker compose ps
 pfa_ollama/
 ├── docker-compose.yml          # Orchestration des services
 ├── Dockerfile.streamlit        # Image Streamlit
-├── .env                        # Variables d'environnement
+├── .env                        # Variables d'environnement (clé API Mistral)
 ├── README.md
 ├── GUIDE_N8N_OLLAMA.md         # Guide technique détaillé
 ├── db/
@@ -81,19 +84,16 @@ pfa_ollama/
     └── requirements.txt        # Dépendances Python
 ```
 
-## ⚙️ Configuration GPU (optionnel)
+## 🔑 Configuration de la clé API Mistral
 
-Si vous avez un **GPU NVIDIA**, décommentez les lignes suivantes dans `docker-compose.yml` sous le service `ollama` :
-
-```yaml
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: all
-          capabilities: [gpu]
-```
+1. Rendez-vous sur [console.mistral.ai](https://console.mistral.ai/)
+2. Créez un compte ou connectez-vous
+3. Allez dans **API Keys** → **Create New Key**
+4. Copiez la clé et collez-la dans `.env` :
+   ```
+   MISTRAL_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
+   ```
+5. Relancez les services : `docker compose up -d --build`
 
 ## 🛑 Arrêter les services
 

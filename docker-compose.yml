@@ -1,6 +1,6 @@
 # =====================================================================
-#  PFA Ollama — Traitement Intelligent de Documents Commerciaux
-#  Services : n8n · Ollama · PostgreSQL · Streamlit
+#  PFA — Traitement Intelligent de Documents Commerciaux
+#  Services : n8n · Mistral OCR · PostgreSQL · Streamlit
 # =====================================================================
 
 services:
@@ -24,49 +24,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - pfa_network
-
-  # ── Ollama (Moteur IA local) ──────────────────────────────────────
-  ollama:
-    image: ollama/ollama:latest
-    container_name: pfa_ollama
-    restart: unless-stopped
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-      - OLLAMA_KEEP_ALIVE=24h
-    # Décommentez les lignes suivantes si vous avez un GPU NVIDIA :
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
-    healthcheck:
-      test: [ "CMD", "ollama", "list" ]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
-    networks:
-      - pfa_network
-
-  # ── Ollama Model Puller (init container) ──────────────────────────
-  ollama-pull:
-    image: ollama/ollama:latest
-    container_name: pfa_ollama_pull
-    depends_on:
-      ollama:
-        condition: service_healthy
-    restart: "no"
-    entrypoint: [ "sh", "-c", "ollama pull ${OLLAMA_MODEL:-moondream}" ]
-    environment:
-      - OLLAMA_HOST=ollama
     networks:
       - pfa_network
 
@@ -112,6 +69,7 @@ services:
       - n8n
     environment:
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY}
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
     ports:
@@ -124,8 +82,6 @@ services:
 # ── Volumes persistants ────────────────────────────────────────────
 volumes:
   postgres_data:
-    driver: local
-  ollama_data:
     driver: local
   n8n_data:
     driver: local

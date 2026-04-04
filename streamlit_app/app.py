@@ -1,6 +1,7 @@
 """
-PFA Ollama — Interface Streamlit
+PFA — Interface Streamlit
 Traitement Intelligent de Documents Commerciaux
+Propulsé par Mistral OCR
 """
 
 import streamlit as st
@@ -8,13 +9,16 @@ import requests
 import json
 import os
 import base64
+import re
 import pandas as pd
 from datetime import datetime
 from io import BytesIO
 from PIL import Image
+from mistralai.client import Mistral
 
 # ── Configuration ────────────────────────────────────────────────────
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "http://localhost:5678/webhook/facture")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 
 # ── Page Config ──────────────────────────────────────────────────────
 st.set_page_config(
@@ -47,7 +51,7 @@ st.markdown("""
         font-size: 2rem;
         font-weight: 700;
         margin: 0;
-        background: linear-gradient(90deg, #a78bfa, #60a5fa, #34d399);
+        background: linear-gradient(90deg, #f97316, #fb923c, #fbbf24);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
     }
@@ -190,74 +194,123 @@ if "current_result" not in st.session_state:
 
 
 # ── Helper Functions ─────────────────────────────────────────────────
-# ── Configuration Ollama directe ─────────────────────────────────────
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "moondream")
 
-EXTRACTION_PROMPT = """Extract invoice data as JSON: fournisseur_nom, fournisseur_adresse, fournisseur_telephone, fournisseur_email, fournisseur_matricule_fiscal, client_nom, client_adresse, facture_numero, facture_date, facture_devise, total_ht, total_tva, total_ttc, timbre_fiscal, articles array with designation/quantite/prix_unitaire/total_ligne. Use null for missing fields, numbers for amounts (dot decimal separator). Respond ONLY with valid JSON, no extra text."""
+EXTRACTION_PROMPT = """Tu es un expert en extraction de données de factures. Voici le contenu OCR d'une facture.
+Extrais les données et retourne UNIQUEMENT un JSON valide avec cette structure exacte :
+
+{
+  "fournisseur": {
+    "nom": "...",
+    "adresse": "...",
+    "telephone": "...",
+    "email": "...",
+    "matricule_fiscal": "..."
+  },
+  "client": {
+    "nom": "...",
+    "adresse": "..."
+  },
+  "facture": {
+    "numero": "...",
+    "date": "...",
+    "devise": "TND"
+  },
+  "articles": [
+    {
+      "designation": "...",
+      "quantite": 0,
+      "prix_unitaire": 0.0,
+      "total_ligne": 0.0
+    }
+  ],
+  "totaux": {
+    "total_ht": 0.0,
+    "total_tva": 0.0,
+    "total_ttc": 0.0,
+    "timbre_fiscal": null,
+    "tva_details": [
+      {"taux_pourcent": 19, "montant": 0.0}
+    ]
+  }
+}
+
+Utilise null pour les champs manquants. Utilise des nombres (avec point décimal) pour les montants.
+Réponds UNIQUEMENT avec le JSON, sans texte ni explication.
+
+Contenu OCR du document :
+"""
 
 
-def optimize_image(file_bytes: bytes, max_size: int = 800) -> bytes:
-    """Réduit la taille de l'image pour accélérer l'inférence sur CPU."""
+def get_mime_type(file_name: str, file_type: str) -> str:
+    """Détermine le MIME type pour l'API Mistral."""
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    mime_map = {
+        "pdf": "application/pdf",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "tiff": "image/tiff",
+        "tif": "image/tiff",
+        "bmp": "image/bmp",
+        "webp": "image/webp",
+    }
+    return mime_map.get(ext, file_type or "image/jpeg")
+
+
+def extract_with_mistral(file_bytes: bytes, file_name: str, mime_type: str) -> dict:
+    """Appelle l'API Mistral OCR pour extraire les données de la facture."""
     try:
-        img = Image.open(BytesIO(file_bytes))
-        # Convertir en RGB si nécessaire
-        if img.mode in ('RGBA', 'P', 'LA'):
-            img = img.convert('RGB')
-        # Redimensionner si trop grand
-        w, h = img.size
-        if max(w, h) > max_size:
-            ratio = max_size / max(w, h)
-            new_w, new_h = int(w * ratio), int(h * ratio)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-        # Sauvegarder en JPEG compressé
-        buf = BytesIO()
-        img.save(buf, format='JPEG', quality=85)
-        return buf.getvalue()
-    except Exception:
-        return file_bytes  # En cas d'erreur, renvoyer l'original
+        if not MISTRAL_API_KEY:
+            return {"success": False, "error": "Clé API Mistral non configurée. Ajoutez MISTRAL_API_KEY dans le fichier .env"}
 
+        print(f"[MISTRAL] Starting extraction for {file_name} ({mime_type})")
 
-def extract_with_ollama(file_bytes: bytes, file_name: str, mime_type: str) -> dict:
-    """Appelle Ollama directement pour extraire les données de la facture."""
-    try:
-        # Optimiser l'image pour CPU
-        if mime_type.startswith("image/"):
-            optimized = optimize_image(file_bytes)
-        else:
-            optimized = file_bytes
+        client = Mistral(api_key=MISTRAL_API_KEY)
 
-        base64_image = base64.b64encode(optimized).decode("utf-8")
+        # ── Étape 1 : OCR avec Mistral ──────────────────────────────
+        resolved_mime = get_mime_type(file_name, mime_type)
+        base64_data = base64.b64encode(file_bytes).decode("utf-8")
+        document_url = f"data:{resolved_mime};base64,{base64_data}"
 
-        payload = {
-            "model": OLLAMA_MODEL,
-            "prompt": EXTRACTION_PROMPT,
-            "images": [base64_image],
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 4096
-            }
-        }
-
-        response = requests.post(
-            f"{OLLAMA_URL}/api/generate",
-            json=payload,
-            timeout=600
+        print(f"[MISTRAL] Calling OCR API (model: mistral-ocr-latest)...")
+        ocr_response = client.ocr.process(
+            model="mistral-ocr-latest",
+            document={
+                "type": "document_url",
+                "document_url": document_url,
+            },
         )
 
-        if response.status_code != 200:
-            error_detail = response.text[:300] if response.text else "Pas de détail"
-            return {"success": False, "error": f"Erreur Ollama ({response.status_code}): {error_detail}"}
+        # Récupérer le texte OCR de toutes les pages
+        ocr_text = ""
+        for page in ocr_response.pages:
+            ocr_text += page.markdown + "\n\n"
 
-        result = response.json()
+        print(f"[MISTRAL] OCR text length: {len(ocr_text)} chars")
+        print(f"[MISTRAL] OCR text (first 500 chars): {ocr_text[:500]}")
 
-        raw_content = result.get("response", "") or result.get("message", {}).get("content", "")
+        if not ocr_text.strip():
+            return {"success": False, "error": "Mistral OCR n'a extrait aucun texte du document. Vérifiez la qualité de l'image."}
 
-        # Nettoyer les balises markdown et <think>
-        import re
-        raw_content = re.sub(r'<think>[\s\S]*?</think>', '', raw_content).strip()
-        raw_content = re.sub(r'^```json\s*', '', raw_content)
+        # ── Étape 2 : Extraction structurée avec Pixtral ─────────────
+        print(f"[MISTRAL] Calling chat API for structured extraction...")
+        chat_response = client.chat.complete(
+            model="mistral-small-latest",
+            messages=[
+                {
+                    "role": "user",
+                    "content": EXTRACTION_PROMPT + ocr_text,
+                }
+            ],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+
+        raw_content = chat_response.choices[0].message.content
+        print(f"[MISTRAL] Chat response (first 500 chars): {raw_content[:500]}")
+
+        # Nettoyer les balises markdown
+        raw_content = re.sub(r'^```json\s*', '', raw_content.strip())
         raw_content = re.sub(r'^```\s*', '', raw_content)
         raw_content = re.sub(r'\s*```$', '', raw_content)
 
@@ -266,7 +319,7 @@ def extract_with_ollama(file_bytes: bytes, file_name: str, mime_type: str) -> di
         last_brace = raw_content.rfind('}')
 
         if first_brace == -1 or last_brace == -1:
-            return {"success": False, "error": f"Pas de JSON dans la réponse Ollama : {raw_content[:300]}"}
+            return {"success": False, "error": f"Pas de JSON dans la réponse Mistral : {raw_content[:300]}"}
 
         json_str = raw_content[first_brace:last_brace + 1]
 
@@ -297,31 +350,33 @@ def extract_with_ollama(file_bytes: bytes, file_name: str, mime_type: str) -> di
             "metadata": {
                 "source_file": file_name,
                 "extraction_date": datetime.now().isoformat(),
-                "model_used": OLLAMA_MODEL,
+                "model_used": "mistral-ocr-latest + mistral-small-latest",
                 "validation_warnings": warnings,
                 "is_valid": len(warnings) == 0,
                 "nombre_articles": len(parsed.get("articles", [])),
-                "mode": "direct_ollama"
+                "ocr_text_length": len(ocr_text),
+                "mode": "mistral_ocr"
             }
         }
 
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": f"Timeout Ollama (>10min). Le modèle {OLLAMA_MODEL} tourne sur CPU. Essayez avec une image plus petite."}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": f"Impossible de se connecter à Ollama ({OLLAMA_URL}). Vérifiez que le service est démarré."}
     except Exception as e:
-        return {"success": False, "error": f"Erreur Ollama : {str(e)}"}
+        print(f"[MISTRAL] ERROR: {e}")
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg:
+            return {"success": False, "error": "Clé API Mistral invalide. Vérifiez MISTRAL_API_KEY dans .env"}
+        if "429" in error_msg:
+            return {"success": False, "error": "Limite de requêtes Mistral atteinte. Réessayez dans quelques secondes."}
+        return {"success": False, "error": f"Erreur Mistral OCR : {error_msg}"}
 
 
 def send_to_n8n(file_bytes: bytes, file_name: str, mime_type: str) -> dict:
-    """Envoie le fichier au webhook n8n. Si n8n échoue, appelle Ollama directement."""
+    """Envoie le fichier au webhook n8n. Si n8n échoue, retourne None pour fallback."""
     try:
         files = {"file": (file_name, file_bytes, mime_type)}
         response = requests.post(N8N_WEBHOOK_URL, files=files, timeout=300)
         response.raise_for_status()
 
         if not response.text or not response.text.strip():
-            # n8n a retourné une réponse vide → fallback Ollama direct
             return None  # Signal pour utiliser le fallback
 
         try:
@@ -404,7 +459,7 @@ def render_extraction(data: dict):
     # ── Totaux ──
     totaux = extraction.get("totaux", {})
     if totaux:
-        devise = facture.get("devise", "TND")
+        devise = facture.get("devise", "TND") if facture else "TND"
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
@@ -460,7 +515,7 @@ def render_extraction(data: dict):
 st.markdown("""
 <div class="main-header">
     <h1>📄 DocuFlow AI</h1>
-    <p>Extraction intelligente de documents commerciaux — Propulsé par Ollama & Qwen3-VL</p>
+    <p>Extraction intelligente de documents commerciaux — Propulsé par Mistral OCR</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -468,7 +523,9 @@ st.markdown("""
 with st.sidebar:
     st.markdown("## ⚙️ Configuration")
     st.markdown(f"**Webhook n8n :** `{N8N_WEBHOOK_URL}`")
-    st.markdown(f"**Modèle IA :** `{OLLAMA_MODEL}`")
+    st.markdown(f"**Moteur IA :** `Mistral OCR`")
+    api_status = "✅ Configurée" if MISTRAL_API_KEY else "❌ Manquante"
+    st.markdown(f"**Clé API :** {api_status}")
     st.divider()
 
     st.markdown("## 📊 Statistiques")
@@ -523,51 +580,54 @@ if uploaded_file:
         if extract_btn:
             st.markdown("#### 📊 Résultats d'extraction")
 
-            with st.spinner(f"🔄 Analyse en cours avec {OLLAMA_MODEL}... (peut prendre 1-3 min sur CPU)"):
-                uploaded_file.seek(0)
-                file_bytes = uploaded_file.read()
+            if not MISTRAL_API_KEY:
+                st.error("❌ Clé API Mistral non configurée. Ajoutez `MISTRAL_API_KEY` dans le fichier `.env`")
+            else:
+                with st.spinner("🔄 Analyse en cours avec Mistral OCR... (5-15 secondes)"):
+                    uploaded_file.seek(0)
+                    file_bytes = uploaded_file.read()
 
-                # Tentative via n8n
-                result = send_to_n8n(
-                    file_bytes=file_bytes,
-                    file_name=uploaded_file.name,
-                    mime_type=uploaded_file.type
-                )
-
-                # Fallback : appel direct à Ollama si n8n échoue
-                if result is None:
-                    st.info("⚡ Appel direct à Ollama (n8n indisponible)...")
-                    result = extract_with_ollama(
+                    # Tentative via n8n
+                    result = send_to_n8n(
                         file_bytes=file_bytes,
                         file_name=uploaded_file.name,
                         mime_type=uploaded_file.type
                     )
 
-            if result.get("success"):
-                st.session_state.current_result = result
-                st.session_state.history.append(result)
+                    # Fallback : appel direct à Mistral OCR si n8n échoue
+                    if result is None:
+                        st.info("⚡ Appel direct à Mistral OCR (n8n indisponible)...")
+                        result = extract_with_mistral(
+                            file_bytes=file_bytes,
+                            file_name=uploaded_file.name,
+                            mime_type=uploaded_file.type
+                        )
 
-                st.markdown("""
-                <div class="success-card">
-                    <h3>✅ Extraction réussie</h3>
-                    <p>Les données ont été extraites avec succès.</p>
-                </div>
-                """, unsafe_allow_html=True)
+                if result.get("success"):
+                    st.session_state.current_result = result
+                    st.session_state.history.append(result)
 
-                render_extraction(result)
+                    st.markdown("""
+                    <div class="success-card">
+                        <h3>✅ Extraction réussie</h3>
+                        <p>Les données ont été extraites avec succès via Mistral OCR.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                # Bouton téléchargement JSON
-                json_str = json.dumps(result.get("extraction", {}), indent=2, ensure_ascii=False)
-                st.download_button(
-                    label="⬇️ Télécharger JSON",
-                    data=json_str,
-                    file_name=f"extraction_{uploaded_file.name.rsplit('.', 1)[0]}.json",
-                    mime="application/json",
-                    use_container_width=True
-                )
-            else:
-                error_msg = result.get("error", "Erreur inconnue")
-                st.error(f"❌ Erreur d'extraction : {error_msg}")
+                    render_extraction(result)
+
+                    # Bouton téléchargement JSON
+                    json_str = json.dumps(result.get("extraction", {}), indent=2, ensure_ascii=False)
+                    st.download_button(
+                        label="⬇️ Télécharger JSON",
+                        data=json_str,
+                        file_name=f"extraction_{uploaded_file.name.rsplit('.', 1)[0]}.json",
+                        mime="application/json",
+                        use_container_width=True
+                    )
+                else:
+                    error_msg = result.get("error", "Erreur inconnue")
+                    st.error(f"❌ Erreur d'extraction : {error_msg}")
 
         elif st.session_state.current_result:
             st.markdown("#### 📊 Dernier résultat")
@@ -577,7 +637,7 @@ if uploaded_file:
 st.divider()
 st.markdown(
     "<p style='text-align:center; color:#64748b; font-size:0.8rem;'>"
-    "DocuFlow AI — PFA 2025 · Propulsé par Ollama, Qwen3-VL & n8n"
+    "DocuFlow AI — PFA 2025 · Propulsé par Mistral OCR & n8n"
     "</p>",
     unsafe_allow_html=True
 )

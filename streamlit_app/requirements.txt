@@ -2,3 +2,4 @@ streamlit==1.41.0
 requests==2.32.3
 Pillow==11.1.0
 pandas==2.2.3
+mistralai>=1.0.0
