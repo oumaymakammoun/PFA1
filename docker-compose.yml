@@ -1,6 +1,6 @@
 # =====================================================================
-#  PFA — Traitement Intelligent de Documents Commerciaux
-#  Services : n8n · Mistral OCR · PostgreSQL · Streamlit
+#  DocuFlow AI — Traitement Intelligent de Documents Commerciaux
+#  Services : PostgreSQL · n8n · Streamlit · Mistral OCR (API)
 # =====================================================================
 
 services:
@@ -66,10 +66,19 @@ services:
     container_name: pfa_streamlit
     restart: unless-stopped
     depends_on:
-      - n8n
+      postgres:
+        condition: service_healthy
+      n8n:
+        condition: service_started
     environment:
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL}
       - MISTRAL_API_KEY=${MISTRAL_API_KEY}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
     ports:
